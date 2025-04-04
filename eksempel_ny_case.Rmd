@@ -1,0 +1,291 @@
+---
+title: "Eksempel med ny case"
+output: html_notebook
+---
+
+# Risiko for barn nummer 2 
+
+-   Hvad kan forklare, at en person får barn nummer 2?
+
+Vi er altså interesseret i forløbet mellem barn 1 og 2 (tvillinger tæller som ét barn)
+
+1.  Hvad er det første vi skal tænkte på iht. et forløbs start?
+
+2.  Er det andet der kunne komplicere analysen iht. data og definition af event?
+
+# Generel fremgang
+
+1. Definér, hvornår den enkelte person, er under risiko for at opleve hændelsen.
+
+2. Fasthold alle observationer, hvor personen er i populationen under risiko. 
+
+3. Overvej, hvilke kovariater, der er relevante at inddrage i undersøgelsen.
+
+4. Overvej om de skal være tidsvarierende eller ikke-tidsvarierende.
+
+5. Lav Kaplan-Meier (sammenlign grupper).
+
+6. Lav Cox-model.
+
+  - Inddrag tidsvarierende variable. 
+  
+  - Lav modelkontrol. 
+
+7. Lav ventetidsmodeller.
+
+  - Bestem, hvilken fordeling, der fitter data bedst.
+
+## Indlæs pakker
+
+```{r message=FALSE, warning=FALSE}
+#| echo: true
+
+
+library(survival)
+library(tidyverse)
+library(survminer)
+
+options(scipen = 999)
+```
+
+## Dannelse af datasæt 
+
+### Læs data 
+
+```{r}
+
+load("Forlob_14032023.rda")
+
+df <- Forlob_18032022
+
+
+```
+
+### Dan relevante variable 
+
+```{r}
+
+df1 <- df %>% 
+  mutate(age = as.numeric(ALDER)) %>%
+  filter(age >= 18) %>%                                               
+  mutate(person_start = case_when(lag(pnr) == pnr ~ 0, TRUE ~ 1)) %>% 
+  mutate(born = as.numeric(C_ANTBOERNF)) %>% 
+  mutate(kvinde = if_else(KOEN == 2, 1, 0)) %>%
+  select(- C_ANTBOERNF, - KOEN, -ALDER)  
+
+```
+
+### Dan event-variablen og start/slut-tider 
+
+```{r}
+
+df2 <- df1 %>% 
+  mutate(event = if_else(lag(born) < born  
+          & person_start == 0 | person_start == 1 & born >= 1, 1, 0))   
+
+df3 <- df2 %>%                                                        
+  mutate(start = age - 18) %>%                                                
+  mutate(slut = age - 17)
+
+```
+
+### Variablen period_slut dannes skal senere bruges til at fastholde observationen af afslutningen inden for den enkelte enhed (personen) til analyse af multiple hændelsesforløb.
+
+```{r}
+
+df4 <- df3 %>%
+  mutate(new = case_when(person_start == 1 ~ 0, 
+                          person_start != 1 ~ lag(event))) %>% 
+  arrange(pnr, aar) %>%
+  group_by(pnr) %>%
+  mutate(period = cumsum(new)+1) %>%  
+  select(-new)%>% 
+  mutate(person_slut = case_when(lead(pnr) == pnr ~ 0, TRUE ~ 1)) %>%
+  mutate(period_slut = case_when(event == 1 | person_slut == 1 ~ 1, TRUE ~ 0)) %>%
+  mutate(igud = as.factor(case_when(i_udd == 1 | i_udd == 2 |
+                                    i_udd == 3 | i_udd == 4 ~ "under_udd" ,
+                                    TRUE ~ "ikke_igang"))) 
+
+```
+
+### Konstruér tidsinvariante variable 
+
+```{r}
+
+df5 <- df4 %>% 
+  filter(person_start == 1) %>% 
+  select(pnr, region) %>% 
+  mutate(region18 = as.factor(case_when(region == 1 ~ "Hovedstaden", 
+                                        region == 2 ~ "Sjælland",
+                                        region == 3 ~ "Syddanmark",
+                                        region == 4 ~ "Midtjylland",
+                                        region == 5 ~ "Nordjylland"))) %>% 
+  select(-region)
+
+
+```
+
+### Merge/join data 
+
+```{r}
+
+df6 <- left_join(df4, df5, by = "pnr")
+
+```
+
+### Konstruér startalder for hver periode
+
+```{r}
+
+df7 <- df6 %>% 
+  mutate(periode_start = case_when(lag(event == 1) & person_start == 0 |  person_start == 1 ~ 1, TRUE ~ 0)) %>% 
+  filter(periode_start == 1) %>% 
+  mutate(periode_startaar = aar, periode_age = age) %>% 
+  select(pnr, period, periode_startaar, periode_age)
+
+```
+
+### Her kombineres datasættene, så oplysningen omkring startåret for det enkelte forløb inden for personen tilføjes 
+
+```{r}
+
+df8 <- left_join(df6, df7, by = c("pnr","period"))
+
+```
+
+### Dannelse af tidsvariable inden for det enkelte forløb
+
+```{r}
+
+multi_all <- mutate(df8, 
+                    pt_start = aar - periode_startaar,
+                    pt_slut = aar - periode_startaar + 1) %>% 
+  select(pnr, aar, event, start, slut, person_slut, 
+         period_slut, periode_startaar, periode_age, 
+         pt_start, pt_slut,
+         everything())
+
+
+
+
+```
+
+### Lav et "kort" og "lang" datasæt 
+
+```{r}
+
+multi_event <- filter(multi_all, period_slut == 1)
+
+multi_all2 <- filter(multi_all, period == 2)
+
+multi_event2 <- filter(multi_all2, period_slut == 1)
+
+```
+
+# Analyse(r)
+
+### KM 
+
+```{r}
+
+KM1 <- survfit(Surv(pt_slut, event) ~ region18, type = "kaplan-meier", data = multi_event2)
+
+ggsurvplot(KM1)
+
+survdiff(Surv(pt_slut, event) ~ region18, data = multi_event2)
+
+```
+
+
+
+### Cox 
+
+```{r}
+
+cox_v1 <- coxph(Surv(pt_start, pt_slut, event) ~ kvinde + periode_age, 
+                method = "efron", 
+                data = multi_all2)
+summary(cox_v1)
+
+#http://personal.psu.edu/drh20/R/html/survival/html/cox.zph.html
+# transform = "identity" argumentet skal inddrages, når counting process anvendes
+(test_cv1 <- cox.zph(cox_v1, transform = "identity"))
+
+# forudsætter indstallation af survminer
+ggcoxzph(test_cv1)[2] #[2] gør, at plottet for kon vises
+
+```
+
+```{r}
+cox_v2 <- coxph(Surv(pt_start, pt_slut, event) ~ kvinde + tt(kvinde) + periode_age + tt(periode_age), 
+                method = "efron", 
+                data = multi_all2, 
+                tt = function(x,t,...)x*t)
+
+summary(cox_v2)
+```
+
+### ATF 
+
+```{r}
+
+#AFT parametrisering 
+aft2 <- survreg(Surv(pt_slut, event) ~ kvinde + periode_age + region18, 
+                dist = c("weibull","exponential","lognormal","loglogistic")[1], 
+                data = multi_event2)
+summary(aft2)
+
+```
+
+### Valg af model (og kovariater)
+
+```{r}
+extractAIC(model_exp)[2] 
+
+extractAIC(model_lognorm)[2]
+
+extractAIC(model_loglog)[2]
+
+extractAIC(model_weibull)[2]
+
+# eller:
+
+test <- anova(model_exp, model_lognorm, model_loglog, model_weibull)
+```
+
+### Discret-tid model 
+
+```{r}
+
+d_log <- glm(event ~ kvinde + igud + as.factor(slut), 
+             data = multi_event2, 
+             family = binomial(link = logit))
+
+summary(d_log)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

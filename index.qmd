@@ -1,0 +1,717 @@
+---
+title: "Event History Analysis – Discrete time analyser"
+encoding: "UTF-8"
+execute:
+  echo: false
+format:
+  revealjs:
+    include-after-body: timer.html
+    embed-resources: true
+    self-contained-math: true
+    smaller: true
+    scrollable: true
+    theme: dark 
+    html-math-method:
+      method: mathjax
+      url: "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML"
+    footer: "Jeppe F. Qvist | XX. april 2025"
+---
+
+# Ny øvelsescase
+
+## Risiko for barn nummer 2 
+
+:::{.incremental}
+
+-   Hvad kan forklare, at en person får barn nummer 2?
+
+- Vi er altså interesseret i forløbet mellem barn 1 og 2 (tvillinger tæller som ét barn)
+
+  1.  Hvad er det første vi skal tænkte på iht. et forløbs start?
+
+  2.  Er det andet der kunne komplicere analysen iht. data og definition af event?
+
+:::
+
+## Fremgang
+
+:::{.incremental}
+
+1. Definér hvornår den enkelte person, er under risiko for at opleve hændelsen.
+
+2. Fasthold alle observationer, hvor personen er i populationen under risiko. 
+
+3. Overvej, hvilke kovariater, der er relevante at inddrage i undersøgelsen.
+
+4. Overvej om de skal være tidsvarierende eller ikke-tidsvarierende.
+
+5. Lav Kaplan-Meier (sammenlign grupper).
+
+6. Lav Cox-model.
+    - Inddrag tidsvarierende variable. 
+    - Lav modelkontrol. 
+
+
+7. Lav ventetidsmodeller.
+    - Bestem hvilken fordeling, der fitter data bedst.
+  
+:::
+
+## Indlæs pakker
+
+```{r} 
+#| echo: true
+
+library(survival)
+library(tidyverse)
+library(survminer)
+
+options(scipen = 999)
+ 
+```
+
+## Dannelse af datasæt: Læs data 
+
+```{r}
+#| echo: true
+#| eval: true
+
+load("/Volumes/Fileshares/mikrooekonometri-F25/Råfiler/Forlob_14032023.rda")
+
+df <- Forlob_18032022
+
+str(df)
+```
+
+## Dannelse af datasæt: Dan relevante variable 
+
+```{r}
+#| echo: true
+#| eval: true
+
+df1 <- 
+  df %>% 
+  mutate(age = as.numeric(ALDER)) %>%                                 # 1
+  filter(age >= 18) %>%                                               # 2              
+  mutate(person_start = case_when(lag(pnr) == pnr ~ 0, TRUE ~ 1)) %>% # 3
+  mutate(born = as.numeric(C_ANTBOERNF)) %>%                          # 4
+  mutate(kvinde = if_else(KOEN == 2, 1, 0)) %>%                       # 5 
+  select(- C_ANTBOERNF, - KOEN, -ALDER)                               # 6
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Omdan `ALDER` til numerisk og opret ny variabel `age`. $\rightarrow$ Tilføjer en ny kolonne `age` som en numerisk version af kolonnen `ALDER`. 
+
+2. Filtrér rækker med personer, der er $18$ år *eller ældre*. $\rightarrow$ Fjerner alle observationer hvor `age` er *under* 18.
+
+3. Opret ny kolonne person_start. $\rightarrow$ Undersøger, om den forrige række---`lag(pnr)`---har samme personnummer som den aktuelle række:
+    - Hvis ja---`person_start = 0` (fortsættelse af samme person).
+    - Hvis nej---*eller* det er første række for en ny person): `person_start = 1`.
+
+4. Omdan `C_ANTBOERNF` til numerisk og kald den `born`. $\rightarrow$ Tilføjer en numerisk version af antal børn som ny kolonne `born`.
+
+5. Opret dummyvariabel `kvinde.` $\rightarrow$ Opretter en binær variabel, hvor `kvinde = 1` hvis `KOEN` er $2$, ellers $0$.
+
+6. Opret dummyvariabel kvinde. $\rightarrow$ Rydder op i datasættet ved at fjerne de kolonner, som er blevet transformeret.
+
+:::
+:::
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Dan event-variablen og start/slut-tider 
+
+```{r}
+#| echo: true
+#| eval: true
+
+df2 <- df1 %>% 
+  mutate(event = if_else(lag(born) < born  
+          & person_start == 0 | person_start == 1 
+          & born >= 1, 1, 0)) %>%                 # 1                       
+  mutate(start = age - 18) %>%                    # 2                 
+  mutate(slut = age - 17)                         # 3
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Opret en ny variabel `event`. $\rightarrow$ identificerer, om der skal markeres en "begivenhed" (fx fødsel af barn): 
+    - Hvis det *ikke* er den første række for en person---`person_start == 0`---***og*** antallet af børn er steget i forhold til den foregående række---`lag(born) < born`---så `event = 1`.
+    - ***Eller*** hvis det er den første række for personen---`person_start == 1`---***og*** personen allerede har ét eller flere børn---`born >= 1`---så, `event = 1`.
+    - ***Ellers***, så `event = 0`.
+
+2. Opret en ny variabel `start`. $\rightarrow$ Beregner en startværdi ved at trække 18 fra den aktuelle alder.
+
+3. Opret en ny variabel `slut`. $\rightarrow$ Ligesom før, men nu trækkes 17 fra `age`, så slut er altid én enhed højere end start.
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Dan period_slut 
+
+Variablen period_slut dannes skal senere bruges til at fastholde observationen af afslutningen inden for den enkelte enhed (personen) til analyse af multiple hændelsesforløb.
+
+```{r}
+#| echo: true
+#| eval: true
+
+df3 <- 
+  df2 %>%
+  mutate(new = case_when(person_start == 1 ~ 0, 
+                          person_start != 1 ~ lag(event))) %>%                     # 1
+  arrange(pnr, aar) %>%                                                            # 2
+  group_by(pnr) %>%                                                                # 3
+  mutate(period = cumsum(new)+1) %>%                                               # 4
+  select(-new)%>%                                                                  # 5
+  mutate(person_slut = case_when(lead(pnr) == pnr ~ 0, TRUE ~ 1)) %>%              # 6
+  mutate(period_slut = case_when(event == 1 | person_slut == 1 ~ 1, TRUE ~ 0)) %>% # 7
+  mutate(igud = as.factor(case_when(i_udd == 1 | i_udd == 2 |
+                                    i_udd == 3 | i_udd == 4 ~ "under_udd" ,
+                                    TRUE ~ "ikke_igang")))                         # 8    
+
+```
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Dan period_slut 
+
+::: {style="font-size: 50%;"}
+
+Variablen period_slut dannes skal senere bruges til at fastholde observationen af afslutningen inden for den enkelte enhed (personen) til analyse af multiple hændelsesforløb.
+
+```{r}
+#| echo: true
+#| eval: true
+
+df3 <- 
+  df2 %>%
+  mutate(new = case_when(person_start == 1 ~ 0, 
+                          person_start != 1 ~ lag(event))) %>%                     # 1
+  arrange(pnr, aar) %>%                                                            # 2
+  group_by(pnr) %>%                                                                # 3
+  mutate(period = cumsum(new)+1) %>%                                               # 4
+  select(-new)%>%                                                                  # 5
+  mutate(person_slut = case_when(lead(pnr) == pnr ~ 0, TRUE ~ 1)) %>%              # 6
+  mutate(period_slut = case_when(event == 1 | person_slut == 1 ~ 1, TRUE ~ 0)) %>% # 7
+  mutate(igud = as.factor(case_when(i_udd == 1 | i_udd == 2 |
+                                    i_udd == 3 | i_udd == 4 ~ "under_udd" ,
+                                    TRUE ~ "ikke_igang")))                         # 8    
+
+```
+
+:::{.incremental}
+
+1. Opret midlertidig variabel `new`: 
+    - Hvis det er første observation for personen, så `new = 0`.
+    - ***Ellers***, `new = event` fra forrige observation---`lag(event)`.
+    - Formålet er at markere, hvornår en ny periode (fx uden fødsel) starter.
+
+2. Sortér data efter person og år. $\rightarrow$ Sørger for, at data er i korrekt rækkefølge inden gruppering og periodedannelse.
+
+3. Gruppér data efter `pnr`. $\rightarrow$ For at beregninger i de næste trin sker individuelt for hver person.
+
+4. Opret variabel `period`. $\rightarrow$ Akkumulerer `new` for at nummerere perioder (fx episoderne mellem fødsler).
+    - Starter ved $1$, så første periode har altid værdien $1$.
+
+5. Fjern den midlertidige variabel `new`. $\rightarrow$ Rydder op i datasættet og er ikke nødvendig for funktionalitet.    
+
+6. Opret variabel `person_slut`. $\rightarrow$ Angiver sidste observation for en person:  
+    - ***Hvis*** næste række tilhører samme person, så `person_slut = 0`.
+    - ***Ellers*** (det er den sidste række for personen), `person_slut = 1`.
+
+7. Opret variabel `period_slut`. $\rightarrow$ Angiver hvornår en periode slutter:
+    - ***Hvis*** en fødsel observeres---`event == 1`---***eller***
+    - Personen ikke længere er i datasættet---`person_slut == 1`---, så period_slut = 1.
+    - ***Ellers***, `period_slut = 0`.
+
+8. Opret faktorvariabel igud (i gang med uddannelse). $\rightarrow$ Samler fire værdier af `i_udd` til én kategori: `"under_udd"`.
+
+:::
+::: 
+
+## Dannelse af datasæt: Konstruér tidsinvariante variable 
+
+```{r}
+#| echo: true
+#| eval: true
+
+df4 <- 
+  df3 %>% 
+  filter(person_start == 1) %>%                                              # 1
+  select(pnr, region) %>%                                                    # 2
+  mutate(region18 = as.factor(case_when(region == 1 ~ "Hovedstaden", 
+                                        region == 2 ~ "Sjælland",
+                                        region == 3 ~ "Syddanmark",
+                                        region == 4 ~ "Midtjylland",
+                                        region == 5 ~ "Nordjylland"))) %>%   # 3
+  select(-region)                                                            # 4
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Filtrér så kun første observation for hver person indgår. $\rightarrow$ Vi beholder kun observationen, hvor personen "træder ind" i datasættet første gang (fx ved 18 år).
+
+2. Vælg `pnr` og `region.`
+
+3. Opret en kategorisk variabel `region18`. $\rightarrow$ Omdanner den numeriske region til en tekstbeskrivelse (faktor) baseret på værdierne. 
+
+4. Fjern den gamle `region`-variabel.
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Merge/join data 
+
+```{r}
+#| echo: true
+#| eval: true
+
+df5 <- left_join(df3, df4, by = "pnr") # 1
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Sammensæt datasættene `df3` og `df4` ved at lave et venstre-join---`left_join()`---på variablen `pnr`:
+    - Hvis en person i `df3` ikke findes i `df4` (hvilket ikke burde ske her), så får de en `NA` i `region18`.
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Konstruér startalder for hver periode
+
+```{r}
+#| echo: true
+#| eval: true
+
+df6 <- 
+  df5 %>% 
+  mutate(periode_start = case_when(lag(event == 1) & 
+                                     person_start == 0 | 
+                                     person_start == 1 ~ 1, TRUE ~ 0)) %>% # 1
+  filter(periode_start == 1) %>%                                           # 2
+  mutate(periode_startaar = aar, periode_age = age) %>%                    # 3
+  select(pnr, period, periode_startaar, periode_age)                       # 4
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Opret en variabel `periode_start`. $\rightarrow$ Markerer starten på en ny overlevelsesperiode:
+    - ***Hvis*** den forrige række---`lag(event)`---var en fødsel og vi stadig er på samme person---`person_start == 0`---***eller***
+    - Hvis det er første observation for personen---`person_start == 1`---så sættes `periode_start = 1`.
+    - ***Ellers***, `periode_start = 0`.
+
+2. Behold kun rækker, hvor `periode_start == 1`. $\rightarrow$ Filtrerer, så vi kun har rækker, hvor en ny periode starter.
+
+3. Opret to nye variable: 
+    - `periode_startaar` = året (aar) for periodens start.
+    - `periode_age` = personens alder (age) ved periodens start.
+
+4. Vælg relevante variable. 
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Merge/join data 
+
+```{r}
+#| echo: true
+#| eval: true
+
+df7 <- left_join(df5, df6, by = c("pnr","period")) # 1
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Merge hele datasættet `df5` (som indeholder alle observationer pr. person og periode)
+med `df6` (som kun indeholder startpunkter og startinformation for hver periode).
+    - Joinet sker på tværs af både personnummer (`pnr`) og periodenummer (`period`), så kun de periodestarter, der matcher korrekt, bliver koblet.
+
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Dannelse af tidsvariable inden for det enkelte forløb
+
+```{r}
+#| echo: true
+#| eval: true
+
+df8 <- 
+  df7 %>% 
+  mutate(pt_start = aar - periode_startaar,
+         pt_slut = aar - periode_startaar + 1) %>%    # 1
+  select(pnr, aar, event, start, slut, person_slut, 
+         period_slut, periode_startaar, periode_age, 
+         pt_start, pt_slut,
+         everything())                                # 2
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Beregn tid (tidsintervaller) siden periodens start (`pt_start`, `pt_slut`):
+    - `pt_start`: Antal år siden perioden startede.
+    - `pt_slut`: Én enhed senere, så perioden kan udtrykkes som fx $[2,3) = \text{år 2 til år 3}$.
+
+2. Organisér kolonnerne. $\rightarrow$ Flytter de vigtigste variabler op først.
+    - `everything()` sørger for, at resten af variablerne bevares, uden at skrive dem alle ned og at disse placeres til sidst.
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+## Dannelse af datasæt: Lav et "kort" og "lang" datasæt 
+
+```{r}
+#| echo: true
+#| eval: true
+
+multi_event <- filter(df8, period_slut == 1)          # 1
+
+multi_all2 <- filter(df8, period == 2)                # 2
+
+multi_event2 <- filter(multi_all2, period_slut == 1)  # 3
+
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. `multi_event`: Find afslutninger på perioder.
+    - Udtrækker alle rækker i `df8`, hvor perioden slutter (altså, enten fordi der sker en fødsel, eller censurering).
+
+2. `multi_all2`: Filtrér alle observationer fra periode 2.
+    - Udtrækker alle rækker, der tilhører periode 2 for alle personer.
+    - "Periode 2" betyder, at det er anden "observationsblok" for personen, dvs. efter første fødsel.
+
+3. `multi_event2`: Find afslutninger i periode 2.
+    - Udtrækker kun de personer i periode 2, hvor perioden slutter (igen: fødsel eller censurering).
+
+:::
+::: 
+
+<span class="timer" data-time="120"></span>
+
+# Analyse 
+
+## Kaplan-Meier 
+
+```{r}
+#| echo: true
+#| eval: true
+
+KM1 <- survfit(Surv(pt_slut, event) ~ region18, type = "kaplan-meier", data = multi_event2)
+```
+
+:::{.incremental}
+
+1. Vi undersøger tiden til begivenhed (`event`) i anden periode (`period == 2`), opdelt efter regionen, personen boede i som 18-årig (`region18`).
+
+2. Vi bruger Kaplan-Meier til at estimere `overlevelseskurver` (dvs. sandsynligheden for ***ikke*** at have oplevet en hændelse som ***funktion af tid***).
+
+:::
+
+## Kaplan-Meier: Visualisering
+
+```{r}
+#| echo: true
+#| eval: true
+
+ggsurvplot(KM1)
+```
+
+## Kaplan-Meier: log-rank-test
+
+```{r}
+#| echo: true
+#| eval: true
+
+survdiff(Surv(pt_slut, event) ~ region18, data = multi_event2)
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Vi tester forskelle mellem regionerne med en log-rank-test (`survdiff`).
+
+2. Hvad viser tallene: 
+    - `Observed` er antallet af faktiske events (fx fødsler) i perioden.
+    - `Expected` er antallet af events man ville forvente, hvis der ikke var forskel mellem regioner.
+    - $(O-E)^{2}/V$ er bidraget til $\chi^2$-testen fra hver region.
+
+3. ``` Chisq = 44.3  on 4 degrees of freedom,  p = 0.000000005 ```
+    - Testen sammenligner overlevelseskurverne for de 5 regioner.
+    - p-værdien er lav: $p < 0.00000001$
+    - Det betyder, at der er en signifikant forskel i risikoen for hændelse (`event`) mellem regionerne (i anden periode).
+
+:::
+:::
+
+## Kaplan-Meier: tolkning
+
+```{r}
+#| echo: true
+#| eval: true
+
+survdiff(Surv(pt_slut, event) ~ region18, data = multi_event2)
+```
+
+:::{.incremental}
+::: {style="font-size: 60%;"}
+
+1. Hovedstaden har færre observerede events (762) end forventet (883) $\rightarrow$ lavere risiko for begivenheden $\rightarrow$ mere langsomme overgange (fx længere til næste fødsel).
+
+2. Nordjylland, Midtjylland og Syddanmark har flere observerede events end forventet $\rightarrow$ højere risiko for eventen $\rightarrow$ hurtigere overgange.
+
+> Kaplan-Meier analysen viser signifikante forskelle i tiden til næste fødsel i anden periode på tværs af regioner (log-rank test: $\chi^{2}(4) = 44.3, p < 0.001$). Særligt personer fra Hovedstaden har længere tid mellem fødslerne, mens personer fra Jylland har kortere intervaller.
+
+:::
+:::
+
+## Cox-model
+
+```{r}
+#| echo: true
+#| eval: true
+
+cox_v1 <- coxph(Surv(pt_start, pt_slut, event) ~ kvinde + periode_age, 
+                method = "efron", 
+                data = multi_all2)
+
+```
+
+## Cox-model: tolkning
+
+::: {style="font-size: 60%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+summary(cox_v1)
+```
+
+:::{.incremental}
+
+1. Vi undersøger tiden til hændelse (fx fødsel) i anden periode, forklaret ved:
+    - `kvinde` (1 = kvinde, 0 = mand).
+    - `periode_age` (alder ved start af perioden).
+
+2. Hvad viser data: 
+    - Antal observationer: 16.145
+    - Antal events: 3.307
+    - ```kvinde:	    coef = 0.97	p = 0.46,	Ikke signifikant → ingen kønseffekt.```
+    - ```periode_age: coef	= 1.016	p = 0.0004,	Signifikant → ældre ved start giver en lidt højere risiko.```
+    
+3. Tolkning: 
+    - Kvinder har ca. samme risiko som mænd for at opleve en hændelse i periode 2 (ingen forskel).
+    - Jo ældre man er ved start af perioden, desto højere er risikoen (ca. +1.6% per år).
+
+:::
+:::
+
+## Cox-model: test af forudsætninger
+
+::: {style="font-size: 60%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+#http://personal.psu.edu/drh20/R/html/survival/html/cox.zph.html
+# transform = "identity" argumentet skal inddrages, når counting process anvendes
+(test_cv1 <- cox.zph(cox_v1, transform = "identity"))
+
+```
+
+:::{.incremental}
+
+1. Tolkning: 
+    - ```kvinde:	p = 0.283 ---	Accepteret, ingen tegn på brud.```
+    - ```periode_age:	p = 0.030	--- Mulig afvigelse fra proportionalitet.```
+    - ```GLOBAL:	p = 0.077	--- Samlet set er modellen *næsten* accepteret på 0.05 sig. niveau, men ikke helt.```
+
+2. For `periode_age` kunne det tyde på, at effekten af alder kan ændre sig over tid i periode 2. Vi kunne evt.:
+    - Tilføje et interaktionsterm med tid.
+    - Stratificere på `periode_age` eller bruge tidsafhængige effekter
+
+:::
+
+> "Cox-regressionen viser, at alder ved periodens start er signifikant forbundet med en øget risiko for hændelse i periode 2 (HR = 1.016, p < 0.001), mens køn ikke har en signifikant effekt. Der er (svage) indikationer på, at proportional hazards-antagelsen ikke er opfyldt for alder."
+
+:::
+
+## Cox-model: udvidelse
+
+```{r}
+#| echo: true
+#| eval: true
+
+cox_v2 <- coxph(Surv(pt_start, pt_slut, event) ~ 
+                  kvinde + tt(kvinde) + periode_age + tt(periode_age), 
+                method = "efron", 
+                data = multi_all2, 
+                tt = function(x,t,...)x*t)
+
+```
+
+
+## Cox-model: tolkning
+
+::: {style="font-size: 60%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+summary(cox_v2)
+```
+
+:::{.incremental}
+
+1. Vi tester, om effekten af `kvinde` og `periode_age` ændrer sig over tid (altså, om proportional hazards-antagelsen er brudt).
+    - ``` kvinde:	0.936	0.34	Ikke signifikant, ingen kønseffekt```
+    - ``` tt(kvinde)	1.012	0.51	Ikke signifikant, effekt af køn ændrer sig ikke over tid```
+    - ``` periode_age	1.034	0.0007	Signifikant, højere alder ved start er forbundet med højere risiko```
+    - ``` tt(periode_age)	0.995	0.046	Signifikant, alderens effekt aftager over tid ```
+
+2. Tolkning: 
+    - `periode_age` har en signifikant tidsafhængig effekt:
+        - $HR < 1$ for `tt(periode_age)` betyder, at jo længere tid der går, desto svagere bliver effekten af alder.
+        - Alder betyder mere i starten af perioden og mindre senere.
+
+:::
+
+> "Cox-analysen med tidsafhængige effekter viser, at alder ved periodestart er signifikant forbundet med en øget risiko for hændelse (HR = 1.03, p < 0.001), men effekten aftager over tid (HR for interaktion = 0.995, p = 0.046). Der ses ingen signifikant effekt af køn, og effekten af køn ændrer sig ikke over tid."
+
+:::
+
+
+
+## Cox-model: fuld model 
+
+
+::: {style="font-size: 50%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+cox_v3 <- coxph(Surv(pt_start, pt_slut, event) ~ 
+                  region18 + kvinde + tt(kvinde) + periode_age + tt(periode_age), 
+                method = "efron", 
+                data = multi_all2, 
+                tt = function(x,t,...)x*t)
+
+summary(cox_v3)
+```
+
+> "Risikoen for hændelse i anden periode varierer signifikant mellem regioner. Unge fra Hovedstaden og Sjælland har lavere risiko sammenlignet med unge fra Nordjylland (HR = 0.75 og 0.83, begge signifikante). Der er ingen signifikant forskel mellem de øvrige regioner. Alder ved periodestart er positivt associeret med hændelse (HR = 1.036, p < 0.001), men effekten aftager svagt over tid (HR for interaktion = 0.994, p = 0.044). Køn har ingen signifikant effekt, og effekten ændrer sig ikke over tid."
+
+:::
+
+## AFT model 
+
+```{r}
+#| echo: true
+#| eval: true
+
+aft1 <- survreg(Surv(pt_slut, event) ~ kvinde + periode_age + region18, 
+                dist = c("weibull"), 
+                data = multi_event2)
+
+aft2 <- survreg(Surv(pt_slut, event) ~ kvinde + periode_age + region18, 
+                dist = c("exponential"), 
+                data = multi_event2)
+
+aft3 <- survreg(Surv(pt_slut, event) ~ kvinde + periode_age + region18, 
+                dist = c("lognormal"), 
+                data = multi_event2)
+
+aft4 <- survreg(Surv(pt_slut, event) ~ kvinde + periode_age + region18, 
+                dist = c("loglogistic"), 
+                data = multi_event2)
+```
+
+## AFT: udvælg bedste model
+
+```{r}
+#| echo: true
+#| eval: true
+
+extractAIC(aft1)[2] 
+
+extractAIC(aft2)[2]
+
+extractAIC(aft3)[2]
+
+extractAIC(aft4)[2]
+```
+
+> "Sammenligning af fire AFT-modeller med forskellige fordelinger viser, at en loglogistisk (aft4) fordeling giver det bedste model-fit (AIC = 15000.4). Dette tyder på, at risikoen for hændelse ikke følger en konstant eller monotont stigende/faldende hazardrate, men snarere varierer over tid."
+
+## AFT: tolkning
+
+::: {style="font-size: 60%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+summary(aft4)
+```
+
+
+> Risikoen for hændelse varierer signifikant mellem regioner. Personer fra Hovedstaden og Sjælland har en længere tid til hændelsen sammenlignet med personer fra Nordjylland (HR = 1.22 og 1.10, begge signifikante). Der er ingen signifikant forskel mellem Syddanmark og Midtjylland. Alder ved periode-start er negativt associeret med hændelse (tiden til hændelsen bliver kortere) (HR = 0.98, p < 0.001), men effekten aftager over tid (HR for interaktion = 0.99, p = 0.044). Køn har ingen signifikant effekt, og effekten ændrer sig ikke over tid.
+
+:::
+
+## Discret-tid model 
+
+```{r}
+#| echo: true
+#| eval: true
+
+d_log <- glm(event ~ region18 + kvinde + periode_age + as.factor(slut), 
+             data = multi_event2, 
+             family = binomial(link = logit))
+```
+
+## Discret-tid model: tolkning 
+
+::: {style="font-size: 60%;"}
+
+```{r}
+#| echo: true
+#| eval: true
+
+summary(d_log)
+```
+
+> "Risikoen for hændelse varierer signifikant mellem regioner. Unge fra Sjælland har en højere risiko for hændelse sammenlignet med unge fra Hovedstaden (OR = 0.67, p = 0.0127), mens der ikke er signifikant forskel mellem de øvrige regioner. Alder ved periode-start er positivt associeret med hændelse (OR = 1.03, p = 0.042), hvilket betyder, at en stigning i alderen øger sandsynligheden for hændelsen. Køn har ingen signifikant effekt på risikoen for hændelse."
+
+::: 

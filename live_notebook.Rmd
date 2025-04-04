@@ -1,0 +1,326 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Risiko for barn nummer 2
+
+-   Hvad kan forklare, at en person får barn nummer 2?
+
+Vi er altså interesseret i forløbet mellem barn 1 og 2 (tvillinger tæller som ét barn)
+
+1.  Hvad er det første vi skal tænkte på iht. et forløbs start?
+
+2.  Er det andet der kunne komplicere analysen iht. data og definition af event?
+
+Generel fremgang
+
+1.  Definér, hvornår den enkelte person, er under risiko for at opleve hændelsen.
+
+2.  Fasthold alle observationer, hvor personen er i populationen under risiko.
+
+3.  Overvej, hvilke kovariater, der er relevante at inddrage i undersøgelsen.
+
+4.  Overvej om de skal være tidsvarierende eller ikke-tidsvarierende.
+
+5.  Lav Kaplan-Meier (sammenlign grupper).
+
+6.  Lav Cox-model.
+
+-   Inddrag tidsvarierende variable.
+
+-   Lav modelkontrol.
+
+7.  Lav ventetidsmodeller.
+
+-   Bestem, hvilken fordeling, der fitter data bedst.
+
+8.  Diskret-tid modeller
+
+## Indlæs pakker 
+
+```{r}
+
+library(tidyverse)
+library(survival)
+library(survminer)
+
+options(scipen = 999)
+
+```
+
+```{r}
+
+load("/Volumes/Fileshares/Oecon-Forloeb24/Råfiler/Forlob_14032023.rda")
+
+```
+
+# Data management 
+
+## Dan/konstruer relevante variable 
+
+```{r}
+
+df1 <- 
+  Forlob_18032022 %>% 
+  mutate(age = as.numeric(ALDER)) %>% 
+  filter(age >= 18) %>% 
+  mutate(person_start = case_when(lag(pnr) == pnr ~ 0, TRUE ~ 1)) %>% 
+  select(pnr, person_start, everything()) %>% 
+  mutate(born = as.numeric(C_ANTBOERNF)) %>% 
+  mutate(kvinde = if_else(KOEN == 2, 1, 0)) %>% 
+  select(-c(KOEN, C_ANTBOERNF, ALDER))
+
+rm(Forlob_18032022)
+
+```
+
+### Dan event-variabel 
+
+```{r}
+
+df2 <- 
+  df1 %>% 
+  mutate(event = if_else(lag(born) < born & person_start == 0 | person_start == 1 & born >= 1, 1, 0)) %>% 
+  select(pnr, person_start, born, event, everything())
+
+
+```
+
+### Tidsvariable 
+
+```{r}
+
+df3 <- 
+  df2 %>% 
+  mutate(start = age-18) %>% 
+  mutate(slut = age-17) %>% 
+  select(pnr, person_start, born, event, age, start, slut, everything())
+
+```
+
+### Hjælpevariable 
+
+```{r}
+
+df4 <- 
+  df3 %>% 
+  mutate(new = case_when(person_start == 1 ~ 0, 
+                         person_start != 1 ~ lag(event))) %>% 
+  arrange(pnr, aar) %>% 
+  group_by(pnr) %>% 
+  mutate(periode = cumsum(new)+1) %>% 
+  select(pnr, person_start, born, event, new, periode, age, start, slut, everything()) %>% 
+  mutate(person_slut = case_when(lead(pnr) == pnr ~ 0, TRUE ~ 1)) %>% 
+  mutate(periode_slut = case_when(event == 1 | person_slut == 1 ~ 1, TRUE ~ 0))
+
+```
+
+## Tidsinvariante variable 
+
+```{r}
+
+df5 <- 
+  df4 %>% 
+  filter(person_start == 1) %>% 
+  select(pnr, region) %>% 
+  mutate(region18 = as.factor(case_when(
+    region == 1 ~ "Hovedstaden",
+    region == 2 ~ "Sjælland",
+    region == 3 ~ "Syddanmark",
+    region == 4 ~ "Midtjylland",
+    region == 5 ~ "Nordjylland"
+  ))) %>% 
+  select(-region)
+
+```
+
+### Join/merge 
+
+```{r}
+
+df6 <- 
+  df4 %>% 
+  left_join(df5, by = "pnr")
+
+```
+
+### Dan/konstruer startalder i hver periode 
+
+```{r}
+
+df7 <- 
+  df6 %>% 
+  mutate(periode_start = case_when(lag(event == 1) & person_start == 0 | person_start == 1 ~ 1, TRUE ~ 0)) %>% 
+  select(pnr, person_start, born, event, new, periode, periode_start, periode_slut, age, start, slut, everything()) %>% 
+  filter(periode_start == 1) %>% 
+  mutate(periode_startaar = aar, 
+         periode_alder = age) %>% 
+  select(pnr, periode, periode_startaar, periode_alder)
+
+```
+
+### Merge/join 
+
+```{r}
+
+df8 <- left_join(df6, df7, by = c("pnr", "periode")) %>% 
+  select(pnr, person_start, born, event, new, periode,
+         periode_slut, 
+         periode_startaar, periode_alder, age, 
+         start, slut, everything())
+
+```
+
+### Endelige datasæt 
+
+```{r}
+
+multi_all <- 
+  df8 %>% 
+  mutate(pt_start = aar - periode_startaar,
+         pt_slut = aar - periode_startaar + 1) %>% 
+  select(pnr, person_start, born, event, new, periode,
+         periode_slut, 
+         periode_startaar, pt_start, pt_slut, 
+         periode_alder, age, 
+         start, slut, everything())
+
+### Kort og lang data 
+
+multi_event <- multi_all %>% filter(periode_slut == 1)
+
+multi_all2 <- 
+  multi_all %>% 
+  filter(periode == 2) %>% 
+  mutate(region18 = factor(region18, levels = c("Hovedstaden", 
+                                                "Midtjylland", 
+                                                "Sjælland",
+                                                "Nordjylland", 
+                                                "Syddanmark")))
+
+multi_event2 <- multi_all2 %>% filter(periode_slut == 1)
+  
+```
+
+# Analyse 
+
+### KM: Kaplan-Meier 
+
+```{r}
+
+km1 <- survfit(Surv(pt_slut, event) ~ region18,
+               type = "kaplan-meier",
+               data = multi_event2)
+
+summary(km1)
+```
+
+```{r}
+
+ggsurvplot(km1)
+
+```
+
+```{r}
+
+survdiff(Surv(pt_slut, event) ~ region18, data = multi_event2)
+
+```
+
+### Cox 
+
+```{r}
+
+cox_model <- coxph(Surv(pt_start, pt_slut, event) ~ 
+                     kvinde + periode_alder + region18,
+                   method = "efron",
+                   data = multi_all2) 
+
+summary(cox_model)
+```
+
+### Cox kontrol 
+
+```{r}
+
+
+cox.zph(cox_model, transform = "identity")
+
+```
+
+```{r}
+cox_model2 <- coxph(Surv(pt_start, pt_slut, event) ~ 
+                     kvinde + periode_alder + tt(periode_alder) + 
+                      region18,
+                   method = "efron",
+                   tt = function(x, t, ...)x*t,
+                   data = multi_all2) 
+
+summary(cox_model2)
+```
+
+```{r}
+cox.zph(cox_model2, transform = "identity")
+```
+
+## AFT 
+
+```{r}
+
+aft_model_weibull <- survreg(Surv(pt_slut, event) ~ 
+                       kvinde + periode_alder + region18,
+                     dist = c("weibull", "exponential", "lognormal", "loglogistic")[1],
+                     data = multi_event2)
+
+aft_model_exp <- survreg(Surv(pt_slut, event) ~ 
+                       kvinde + periode_alder + region18,
+                     dist = c("weibull", "exponential", "lognormal", "loglogistic")[2],
+                     data = multi_event2)
+
+aft_model_lognormal <- survreg(Surv(pt_slut, event) ~ 
+                       kvinde + periode_alder + region18,
+                     dist = c("weibull", "exponential", "lognormal", "loglogistic")[3],
+                     data = multi_event2)
+
+aft_model_loglog <- survreg(Surv(pt_slut, event) ~ 
+                       kvinde + periode_alder + region18,
+                     dist = c("weibull", "exponential", "lognormal", "loglogistic")[4],
+                     data = multi_event2)
+
+```
+
+```{r}
+
+extractAIC(aft_model_exp)[2]
+extractAIC(aft_model_weibull)[2]
+extractAIC(aft_model_lognormal)[2]
+extractAIC(aft_model_loglog)[2]
+
+```
+
+```{r}
+
+anova(aft_model_exp, aft_model_weibull, aft_model_lognormal, aft_model_loglog)
+
+```
+
+## Diskret-tid model
+
+```{r}
+
+diskret <- glm(event ~ kvinde + periode_alder + region18 + as.factor(pt_slut),
+               data = multi_event2,
+               family = binomial(link = "logit"))
+
+summary(diskret)
+
+```
+
+```{r}
+diskret <- glm(event ~ kvinde + periode_alder + region18 + pt_slut*pt_slut,
+               data = multi_event2,
+               family = binomial(link = "logit"))
+
+summary(diskret)
+```
