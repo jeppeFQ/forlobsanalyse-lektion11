@@ -1,5 +1,5 @@
 ---
-title: "Event History Analysis – Discrete time analyser"
+title: "Forløbsanalyse -- nyt eksempel"
 encoding: "UTF-8"
 execute:
   echo: false
@@ -14,7 +14,7 @@ format:
     html-math-method:
       method: mathjax
       url: "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML"
-    footer: "Jeppe F. Qvist | XX. april 2025"
+    footer: "Jeppe F. Qvist | 1. maj 2025"
 ---
 
 # Ny øvelsescase
